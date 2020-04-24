@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 char dirPath[100] = "/home/noel/Documents";
 char logPath[100] = "/home/noel/fs.log";
@@ -17,11 +18,11 @@ char logPath[100] = "/home/noel/fs.log";
 char cipherkey[100] = "9(ku@AW1[Lmvgax6q`5Y2Ry?+sF!^HKQiBXCUSe&0M.b%rI'7d)o4~VfZ*{#:}ETt$3J-zpc]lnh8,GwP_ND|jO";
 int ciphershift = 10;
 
-char* cipher(char* name) {
+char* cipher(char* name, int file) {
     int width = strlen(cipherkey);
     char* ext = strrchr(name, '.');
     int x = 0;
-    if (ext != NULL) x = strlen(ext);
+    if (ext != NULL && file) x = strlen(ext);
     for (int i = 0; i < strlen(name)-x; i++) {
         for (int j = 0; j < width; j++) {
             if (name[i] == cipherkey[j]) {
@@ -33,11 +34,11 @@ char* cipher(char* name) {
     return name;
 }
 
-char* decipher(char* name) {
+char* decipher(char* name, int file) {
     int width = strlen(cipherkey);
     char* ext = strrchr(name, '.');
     int x = 0;
-    if (ext != NULL) x = strlen(ext);
+    if (ext != NULL && file) x = strlen(ext);
     for (int i = 0; i < strlen(name)-x; i++) {
         for (int j = 0; j < width; j++) {
             if (name[i] == cipherkey[j]) {
@@ -47,6 +48,70 @@ char* decipher(char* name) {
         }
     }
     return name;
+}
+
+char* processPath(char* path) {
+    int enc = 0, a = 1, b = strchr(path+a, '/') - path - 1;
+    while (b < strlen(path)) {
+        char current[1000];
+        strncpy(current, path+a, b-a+1);
+        current[b-a+1] = '\0';
+        if (enc) {
+            cipher(current, 0);
+            strncpy(path+a, current, b-a+1);
+        }
+        if (enc == 0 && strstr(path+a, "encv1_") == path+a) enc = 1;
+        a = b+2;
+        b = strchr(path+a, '/') - path - 1;
+    }
+    b = strlen(path) - 1;
+    char current[1000];
+    strncpy(current, path+a, b-a+1);
+    current[b-a+1] = '\0';
+    if (enc) {
+        cipher(current, 1);
+        strncpy(path+a, current, b-a+1);
+    }
+    return path;
+}
+
+char* getFilename(char* path) {
+    if (!strcmp(path, "/")) return NULL;
+    return strrchr(path, '/')+1;
+}
+
+void splitfile(char* path) {
+    char prefix[strlen(path) + 5];
+    sprintf(prefix, "%s.", path);
+    pid_t child = fork();
+    if (child == 0) execl("/usr/bin/split", "split", "-b", "1024", "-d", "-a", "3", path, prefix, NULL);
+    int status;
+    while (wait(&status) > 0);
+    unlink(path);
+}
+
+void unsplitfile(char* path) {
+    char* last4 = path + strlen(path) - 4;
+    if (strcmp(last4, ".000")) return;
+    last4[0] = '\0';
+    FILE* out = fopen(path, "wb");
+    char buffer[1500];
+    int index = 0;
+    while (1) {
+        char blockname[strlen(path) + 10];
+        sprintf(blockname, "%s.%03d", path, index);
+        FILE* f = fopen(blockname, "rb");
+        if (!f) break;
+        fseek(f, 0L, SEEK_END);
+        int size = ftell(f);
+        rewind(f);
+        fread(buffer, sizeof(char), size, f);
+        fwrite(buffer, sizeof(char), size, out);
+        fclose(f);
+        unlink(blockname);
+        index++;
+    }
+    fclose(out);
 }
 
 void info(char* msg) {
@@ -78,6 +143,40 @@ char* joinPath(char* dest, char* a, const char* b) {
     return dest;
 }
 
+int encryptedPath(char* path) {
+    char* tok = strtok(path, "/");
+    char* next = strtok(NULL, "/");
+    int out = 0;
+    while (next) {
+        if (strlen(tok) >= 6 && tok[0] == 'e' && tok[1] == 'n' && tok[2] == 'c' && tok[3] == 'v' && tok[5] == '_') {
+            if (tok[4] == '1') {
+                out |= 1;
+            } else if (tok[4] == '2') {
+                out |= 2;
+            }
+        }
+        tok = next;
+        next = strtok(NULL, "/");
+    }
+    return out;
+}
+
+int encryptedDir(char* path) {
+    char* tok = strtok(path, "/");
+    int out = 0;
+    while (tok) {
+        if (strlen(tok) >= 6 && tok[0] == 'e' && tok[1] == 'n' && tok[2] == 'c' && tok[3] == 'v' && tok[5] == '_') {
+            if (tok[4] == '1') {
+                out |= 1;
+            } else if (tok[4] == '2') {
+                out |= 2;
+            }
+        }
+        tok = strtok(NULL, "/");
+    }
+    return out;
+}
+
 void rec_encv1(char* path, int mode) {
     struct dirent* ent;
     DIR* dir;
@@ -89,8 +188,8 @@ void rec_encv1(char* path, int mode) {
         char newFile[strlen(file) + 10];
         char newFilename[strlen(ent->d_name) + 10];
         strcpy(newFilename, ent->d_name);
-        if (mode == 1) joinPath(newFile, path, cipher(newFilename));
-        else if (mode == -1) joinPath(newFile, path, decipher(newFilename));
+        if (mode == 1) joinPath(newFile, path, cipher(newFilename, 1));
+        else if (mode == -1) joinPath(newFile, path, decipher(newFilename, 1));
         if (ent->d_type == DT_DIR) {
             rename(file, newFile);
             rec_encv1(newFile, mode);
@@ -107,9 +206,28 @@ void encv1(char* path, int mode) {
     rec_encv1(path, mode);
 }
 
-char* getFilename(char* path) {
-    if (!strcmp(path, "/")) return NULL;
-    return strrchr(path, '/')+1;
+void rec_encv2(char* path, int mode) {
+    struct dirent* ent;
+    DIR* dir;
+    if ((dir = opendir(path)) == NULL) return;
+    while ((ent = readdir(dir)) != NULL) {
+        if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+        char file[strlen(path) + strlen(ent->d_name) + 10];
+        joinPath(file, path, ent->d_name);
+        if (ent->d_type == DT_DIR) {
+            rec_encv2(file, mode);
+        } else if (ent->d_type == DT_REG) {
+            if (mode == 1) splitfile(file);
+            else if (mode == -1) unsplitfile(file);
+        }
+    }
+}
+
+void encv2(char* path, int mode) {
+    struct stat pathstat;
+    stat(path, &pathstat);
+    if (!S_ISDIR(pathstat.st_mode)) return;
+    rec_encv2(path, mode);
 }
 
 static int xmp_getattr(const char *path, struct stat *stbuf)
@@ -117,7 +235,8 @@ static int xmp_getattr(const char *path, struct stat *stbuf)
 	int res;
 
     char fPath[1000];
-	res = lstat(joinPath(fPath, dirPath, path), stbuf);
+    joinPath(fPath, dirPath, path);
+	res = lstat(processPath(fPath), stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -129,7 +248,8 @@ static int xmp_access(const char *path, int mask)
 	int res;
 
     char fPath[1000];
-	res = access(joinPath(fPath, dirPath, path), mask);
+    joinPath(fPath, dirPath, path);
+	res = access(processPath(fPath), mask);
 	if (res == -1)
 		return -errno;
 
@@ -141,7 +261,8 @@ static int xmp_readlink(const char *path, char *buf, size_t size)
 	int res;
 
     char fPath[1000];
-	res = readlink(joinPath(fPath, dirPath, path), buf, size - 1);
+    joinPath(fPath, dirPath, path);
+	res = readlink(processPath(fPath), buf, size - 1);
 	if (res == -1)
 		return -errno;
 
@@ -158,18 +279,28 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_
 	(void) fi;
 
     char fPath[1000];
-	dp = opendir(joinPath(fPath, dirPath, path));
+    joinPath(fPath, dirPath, path);
+	dp = opendir(processPath(fPath));
 	if (dp == NULL)
 		return -errno;
 
-	while ((de = readdir(dp)) != NULL) {
-		struct stat st;
-		memset(&st, 0, sizeof(st));
-		st.st_ino = de->d_ino;
-		st.st_mode = de->d_type << 12;
-		if (filler(buf, de->d_name, &st, 0))
-			break;
-	}
+    int mode = encryptedDir(fPath);
+
+    while ((de = readdir(dp)) != NULL) {
+        struct stat st;
+        memset(&st, 0, sizeof(st));
+        st.st_ino = de->d_ino;
+        st.st_mode = de->d_type << 12;
+        char name[strlen(de->d_name) + 10];
+        strcpy(name, de->d_name);
+        if (mode == 1) {
+            if (de->d_type == DT_REG) decipher(name, 1);
+            else if (de->d_type == DT_DIR && strcmp(de->d_name, ".") && strcmp(de->d_name, "..")) decipher(name, 0);
+            if (filler(buf, name, &st, 0)) break;
+        } else {
+            if (filler(buf, name, &st, 0)) break;
+        }
+    }
 
 	closedir(dp);
 	return 0;
@@ -181,6 +312,7 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 
     char fPath[1000];
     joinPath(fPath, dirPath, path);
+    processPath(fPath);
 	if (S_ISREG(mode)) {
 		res = open(fPath, O_CREAT | O_EXCL | O_WRONLY, mode);
 		if (res >= 0)
@@ -203,7 +335,8 @@ static int xmp_mkdir(const char *path, mode_t mode)
 	int res;
 
     char fPath[1000];
-	res = mkdir(joinPath(fPath, dirPath, path), mode);
+    joinPath(fPath, dirPath, path);
+	res = mkdir(processPath(fPath), mode);
 	if (res == -1)
 		return -errno;
 
@@ -214,6 +347,8 @@ static int xmp_mkdir(const char *path, mode_t mode)
         name[6] = '\0';
         if (!strcmp(name, "encv1_")) {
             encv1(fPath, 1);
+        } else if (!strcmp(name, "encv2_")) {
+            encv2(fPath, 1);
         }
     }
     char msg[1500];
@@ -227,7 +362,8 @@ static int xmp_unlink(const char *path)
 	int res;
 
     char fPath[1000];
-	res = unlink(joinPath(fPath, dirPath, path));
+    joinPath(fPath, dirPath, path);
+	res = unlink(processPath(fPath));
 	if (res == -1)
 		return -errno;
 
@@ -242,7 +378,8 @@ static int xmp_rmdir(const char *path)
 	int res;
 
     char fPath[1000];
-	res = rmdir(joinPath(fPath, dirPath, path));
+    joinPath(fPath, dirPath, path);
+	res = rmdir(processPath(fPath));
 	if (res == -1)
 		return -errno;
 
@@ -257,7 +394,9 @@ static int xmp_rename(const char *from, const char *to)
 	int res;
 
     char fromPath[1000], toPath[1000];
-	res = rename(joinPath(fromPath, dirPath, from), joinPath(toPath, dirPath, to));
+    joinPath(fromPath, dirPath, from);
+    joinPath(toPath, dirPath, to);
+	res = rename(processPath(fromPath), processPath(toPath));
 	if (res == -1)
 		return -errno;
 
@@ -269,6 +408,8 @@ static int xmp_rename(const char *from, const char *to)
         name[6] = '\0';
         if (!strcmp(name, "encv1_")) {
             new = 1;
+        } else if (!strcmp(name, "encv2_")) {
+            new = 2;
         }
     }
     int old = 0;
@@ -278,10 +419,20 @@ static int xmp_rename(const char *from, const char *to)
         name[6] = '\0';
         if (!strcmp(name, "encv1_")) {
             old = 1;
+        } else if (!strcmp(name, "encv2_")) {
+            old = 2;
         }
     }
-    if (!old && new) encv1(toPath, 1);
-    else if (old && !new) encv1(toPath, -1);
+    if (old == 0) {
+        if (new == 1) encv1(toPath, 1);
+        else if (new == 2) encv2(toPath, 1);
+    } else if (old == 1) {
+        if (new != 1) encv1(toPath, -1);
+        if (new == 2) encv2(toPath, 1);
+    } else if (old == 2) {
+        if (new != 2) encv2(toPath, -1);
+        if (new == 1) encv1(toPath, 1);
+    }
     char msg[2500];
     sprintf(msg, "RENAME::%s::%s", fromPath, toPath);
     info(msg);
@@ -293,7 +444,8 @@ static int xmp_chmod(const char *path, mode_t mode)
 	int res;
 
     char fPath[1000];
-	res = chmod(joinPath(fPath, dirPath, path), mode);
+    joinPath(fPath, dirPath, path);
+	res = chmod(processPath(fPath), mode);
 	if (res == -1)
 		return -errno;
 
@@ -308,7 +460,8 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 	int res;
 
     char fPath[1000];
-	res = lchown(joinPath(fPath, dirPath, path), uid, gid);
+    joinPath(fPath, dirPath, path);
+	res = lchown(processPath(fPath), uid, gid);
 	if (res == -1)
 		return -errno;
 
@@ -323,7 +476,8 @@ static int xmp_truncate(const char *path, off_t size)
 	int res;
 
     char fPath[1000];
-	res = truncate(joinPath(fPath, dirPath, path), size);
+    joinPath(fPath, dirPath, path);
+	res = truncate(processPath(fPath), size);
 	if (res == -1)
 		return -errno;
 
@@ -344,7 +498,8 @@ static int xmp_utimens(const char *path, const struct timespec ts[2])
 	tv[1].tv_usec = ts[1].tv_nsec / 1000;
 
     char fPath[1000];
-	res = utimes(joinPath(fPath, dirPath, path), tv);
+    joinPath(fPath, dirPath, path);
+	res = utimes(processPath(fPath), tv);
 	if (res == -1)
 		return -errno;
 
@@ -359,7 +514,8 @@ static int xmp_open(const char *path, struct fuse_file_info *fi)
 	int res;
 
     char fPath[1000];
-	res = open(joinPath(fPath, dirPath, path), fi->flags);
+    joinPath(fPath, dirPath, path);
+	res = open(processPath(fPath), fi->flags);
 	if (res == -1)
 		return -errno;
 
@@ -374,7 +530,8 @@ static int xmp_read(const char *path, char *buf, size_t size, off_t offset, stru
 
 	(void) fi;
     char fPath[1000];
-	fd = open(joinPath(fPath, dirPath, path), O_RDONLY);
+    joinPath(fPath, dirPath, path);
+	fd = open(processPath(fPath), O_RDONLY);
 	if (fd == -1)
 		return -errno;
 
@@ -393,7 +550,8 @@ static int xmp_write(const char *path, const char *buf, size_t size, off_t offse
 
 	(void) fi;
     char fPath[1000];
-	fd = open(joinPath(fPath, dirPath, path), O_WRONLY);
+    joinPath(fPath, dirPath, path);
+	fd = open(processPath(fPath), O_WRONLY);
 	if (fd == -1)
 		return -errno;
 
@@ -413,7 +571,8 @@ static int xmp_statfs(const char *path, struct statvfs *stbuf)
 	int res;
 
     char fPath[1000];
-	res = statvfs(joinPath(fPath, dirPath, path), stbuf);
+    joinPath(fPath, dirPath, path);
+	res = statvfs(processPath(fPath), stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -426,7 +585,8 @@ static int xmp_create(const char* path, mode_t mode, struct fuse_file_info* fi) 
 
     int res;
     char fPath[1000];
-    res = creat(joinPath(fPath, dirPath, path), mode);
+    joinPath(fPath, dirPath, path);
+    res = creat(processPath(fPath), mode);
     if(res == -1)
 	return -errno;
 
